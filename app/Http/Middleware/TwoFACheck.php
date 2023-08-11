@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Models\Verify;
+use App\Services\CacheService;
 use Closure;
 use Illuminate\Http\Request;
 
@@ -19,8 +20,10 @@ class TwoFACheck
     {
 
         $user=auth()->user();
-        $verify = Verify::where('email',$user->email)->first();
-        if($user->enable_2fa && $verify->is_active == 1){
+
+        $cache = resolve(CacheService::class)->is2FAActive($user->id,'get');
+        // $verify = Verify::where('email',$user->email)->first();
+        if($user->enable_2fa && $cache == 'active'){
             return redirect('/2fa-verification');
         }
 

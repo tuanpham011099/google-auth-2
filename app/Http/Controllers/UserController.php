@@ -2,11 +2,13 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\CacheService;
 use App\Models\User;
 use App\Models\Verify;
 use Exception;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Twilio\Rest\Client;
 
@@ -18,6 +20,10 @@ class UserController extends Controller
         $secret = env('TWILIO_TOKEN');
 
         return new Client($sid, $secret);
+    }
+
+    protected function cache(){
+        return resolve(CacheService::class);
     }
 
     public function addPasswordView(){
@@ -61,7 +67,7 @@ class UserController extends Controller
         $user=auth()->user();
 
         if($user->enable_2fa){
-            Verify::where(['email'=>$user->email])->update(['is_active'=>1]);
+            $this->cache()->is2FAActive($user->id,'set','active');
         }
 
         Auth::logout();
@@ -115,7 +121,9 @@ class UserController extends Controller
             return redirect('/add-phone')->with(['error' => 'Phone number already in use']);
         }
 
-        User::where('email',$user->email)->update(['phone'=>$request->phone,'verification_code'=>$code]);
+        User::where('email',$user->email)->update(['phone'=>$request->phone]);
+
+        $this->cache()->setVerification($user->id,$code);
 
         try {
             $this->sendMsg($request->phone,$code);
@@ -130,10 +138,11 @@ class UserController extends Controller
         $user = auth()->user();
         $code = $request->code;
 
-        $exist = User::where('email',$user->email)->first();
+        $verification_code=$this->cache()->getVerification($user->id);
 
-        if($exist->verification_code == $code){
-            $exist->update(['verification_code'=>null,'phone_verified'=>1]);
+        if($verification_code == $code){
+
+            User::where('email', $user->email)->update(['phone_verified' => 1]);
 
             return redirect('/add-phone')->with(['success' => 'Phone number verified success']);
         }else{
@@ -159,8 +168,13 @@ class UserController extends Controller
         $user = auth()->user();
         $code = rand(100000, 999999);
 
+        if($user->phone_verified!==1){
+            return response()->json(['error'=>'You have not verified your phone number yet!!!']);
+        }
         try {
-            User::where('email', $user->email)->update(['verification_code' => $code]);
+
+           $this->cache()->set2FACode($user->id,$code);
+
            $this->sendMsg($user->phone,$code);
 
            return view('2fa-enable');
@@ -174,10 +188,12 @@ class UserController extends Controller
         $user = auth()->user();
 
         $exist = User::where('email',$user->email)->first();
+        $twofaCode =  $this->cache()->get2FACode($user->id);
 
-        if($code == $exist->verification_code){
-            $exist->update(['enable_2fa'=>true,'verification_code'=>null]);
-            Verify::where('email',$user->email)->update(['is_active'=>0]);
+        if($code == $twofaCode){
+            $exist->update(['enable_2fa'=>true]);
+
+            $this->cache()->is2FAActive($user->id,'set','active');
         }
 
         return redirect('/profile')->with(['success'=>'You\'ve enabled 2FA sms']);
@@ -186,12 +202,15 @@ class UserController extends Controller
     public function TwoFAVerificationView(){
         $user = auth()->user();
 
-        $exist = Verify::where(['email'=>$user->email])->first();
-        if($exist->code){
-            $this->sendMsg($user->phone, $exist->code);
+        $exist = $this->cache()->getVerification($user->id);
+
+        if($exist){
+            $this->sendMsg($user->phone, $exist);
         }else{
             $code = rand(100000, 999999);
-            Verify::updateOrCreate(['email' => $user->email],['code'=>$code]);
+
+            $this->cache()->setVerification($user->id,$code);
+
             $this->sendMsg($user->phone, $code);
         }
         return view('2fa-verification');
@@ -199,10 +218,10 @@ class UserController extends Controller
 
     public function TwoFAVerification(Request $request){
         $user = auth()->user();
-        $exist = Verify::where('email',$user->email)->first();
+        $exist = $this->cache()->getVerification($user->id);
 
-        if($request->code == $exist->code){
-            $exist->update(['code'=>null,'is_active'=>0]);
+        if($request->code == $exist){
+            $this->cache()->is2FAActive($user->id, 'set', 'deactive');
 
             return redirect('profile')->with(['success'=>'Logged in']);
         }else{
